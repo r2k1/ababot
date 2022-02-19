@@ -41,8 +41,6 @@ func main() {
 	store, err := NewStore("data.json")
 	checkErr(err)
 
-	//checkErr(store.Save())
-
 	b, err := tele.NewBot(pref)
 	checkErr(err)
 	b.Use(middleware.Logger())
@@ -53,7 +51,7 @@ func main() {
 			return err
 		}
 		availableSlots := availableSlots(data)
-		return c.Send(availableSlots.String(), tele.ModeHTML)
+		return c.Send(availableSlots.HTML(), tele.ModeHTML)
 	})
 	b.Handle("/filter", func(c tele.Context) error {
 		data, err := fetchData()
@@ -64,7 +62,7 @@ func main() {
 		if len(availableSlots) == 0 {
 			return c.Send("no available times for selected times")
 		}
-		return c.Send(availableSlots.String(), tele.ModeHTML)
+		return c.Send(availableSlots.HTML(), tele.ModeHTML)
 
 	})
 	b.Handle("/subscribe", func(c tele.Context) error {
@@ -75,6 +73,43 @@ func main() {
 		}
 		return c.Send("noted")
 	})
+	go func() {
+		log.Println("starting refresher")
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+
+		check := func() {
+			log.Println("refreshing data")
+			data, err := fetchData()
+			if err != nil {
+				log.Println(err)
+			}
+			availableSlots := availableSlots(data)
+			for user := range store.Data.Users {
+				newSlots := store.NewSlots(user, availableSlots)
+				if len(newSlots) == 0 {
+					continue
+				}
+				userID, err := strconv.ParseInt(user, 10, 64)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				log.Printf("sending %v slots to %v", len(newSlots), userID)
+				_, err = b.Send(&tele.User{ID: userID}, newSlots.HTML(), tele.ModeHTML)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+			}
+		}
+
+		check()
+		for range ticker.C {
+			check()
+		}
+	}()
+
 	log.Println("listening to messages")
 	b.Start()
 }
@@ -87,7 +122,7 @@ type Booking struct {
 
 func fetchData() (map[time.Time]int, error) {
 	const layout = "2006-01-02"
-	url := fmt.Sprintf("https://platform.aklbadminton.com/api/booking/feed?start=%s&end=%s", time.Now().Format(layout), time.Now().Add(time.Hour*24*2).Format(layout))
+	url := fmt.Sprintf("https://platform.aklbadminton.com/api/booking/feed?start=%s&end=%s", time.Now().Format(layout), time.Now().Add(time.Hour*24*7).Format(layout))
 	log.Println("fetching", url)
 	resp, err := http.DefaultClient.Get(url)
 	if err != nil {
@@ -167,7 +202,7 @@ func (c Slots) toSlice() []Slot {
 	return result
 }
 
-func (c Slots) String() string {
+func (c Slots) HTML() string {
 	var result string
 	for _, slot := range c.toSlice() {
 		result += fmt.Sprintf("<code>%s - %d</code>\n", slot.Timestamp.Format("Mon 2006-01-02 15:04"), slot.Courts)

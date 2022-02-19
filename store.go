@@ -23,9 +23,17 @@ type Data struct {
 }
 
 type UserData struct {
-	ID       string      `json:"id"`
-	Times    []Weektime  `json:"times"`
-	Notified []time.Time `json:"notified"`
+	ID       string                 `json:"id"`
+	Times    []Weektime             `json:"times"`
+	Notified map[time.Time]struct{} `json:"notified"`
+}
+
+func NewUserData(id string) *UserData {
+	return &UserData{
+		ID:       id,
+		Times:    make([]Weektime, 0),
+		Notified: make(map[time.Time]struct{}),
+	}
 }
 
 type Weektime struct {
@@ -53,9 +61,7 @@ func NewStore(path string) (*Store, error) {
 func (s *Store) addTime(userID string, time Weektime) {
 	user, ok := s.Data.Users[userID]
 	if !ok {
-		user = &UserData{
-			ID: userID,
-		}
+		user = NewUserData(userID)
 		s.Data.Users[userID] = user
 	}
 	user.Times = append(user.Times, time)
@@ -117,6 +123,23 @@ func (s *Store) AddTime2(userID string, timeS string) error {
 		Minute:  int(minute),
 	})
 	return s.save()
+}
+
+func (s *Store) NewSlots(userID string, availableSlots Slots) Slots {
+	s.Lock()
+	defer s.Unlock()
+	data := s.Data.Users[userID]
+	userSlots := availableSlots.filterTimes(data.Times)
+	result := make(Slots)
+	for k, v := range userSlots {
+		if _, ok := data.Notified[k]; ok {
+			continue
+		}
+		data.Notified[k] = struct{}{}
+		result[k] = v
+	}
+	_ = s.save()
+	return result
 }
 
 func (s *Store) save() error {
