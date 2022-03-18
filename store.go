@@ -24,22 +24,61 @@ type Data struct {
 
 type UserData struct {
 	ID       string                 `json:"id"`
-	Times    []Weektime             `json:"times"`
+	Times    []TimeRange            `json:"times"`
 	Notified map[time.Time]struct{} `json:"notified"`
 }
 
 func NewUserData(id string) *UserData {
 	return &UserData{
 		ID:       id,
-		Times:    make([]Weektime, 0),
+		Times:    make([]TimeRange, 0),
 		Notified: make(map[time.Time]struct{}),
 	}
 }
 
-type Weektime struct {
+type TimeRange struct {
 	Weekday time.Weekday `json:"weekday"`
-	Hour    int          `json:"hours"`
-	Minute  int          `json:"minutes"`
+	Start   Clock
+	End     Clock
+}
+
+func ParseTimeRange(input string) (TimeRange, error) {
+	data := strings.Split(strings.ToLower(strings.TrimSpace(input)), " ")
+	if len(data) != 2 {
+		return TimeRange{}, errors.New(`incorrect time format, expected format: "Mon 15:00-17:00"`)
+	}
+	weekday, ok := weekdayMapping[data[0]]
+	if !ok {
+		return TimeRange{}, fmt.Errorf("unknown day of the week: %s", weekday)
+	}
+
+	clocks := strings.Split(data[1], "-")
+	if (len(clocks)) != 2 {
+		return TimeRange{}, errors.New("time should be provided in 13:00-15:00 format")
+	}
+	startClock, err := parseTime(clocks[0])
+	if err != nil {
+		return TimeRange{}, err
+	}
+	endClock, err := parseTime(clocks[1])
+	if err != nil {
+		return TimeRange{}, err
+	}
+
+	return TimeRange{
+		Weekday: weekday,
+		Start:   startClock,
+		End:     endClock,
+	}, nil
+}
+
+func (r *TimeRange) String() string {
+	return fmt.Sprintf("%s %02d:%02d-%02d:%02d", r.Weekday.String()[:3], r.Start.Hour, r.Start.Minute, r.End.Hour, r.End.Minute)
+}
+
+type Clock struct {
+	Hour   uint `json:"hours"`
+	Minute uint `json:"minutes"`
 }
 
 func NewStore(path string) (*Store, error) {
@@ -58,13 +97,33 @@ func NewStore(path string) (*Store, error) {
 	}, nil
 }
 
-func (s *Store) addTime(userID string, time Weektime) {
+func (s *Store) addTime(userID string, time TimeRange) {
 	user, ok := s.Data.Users[userID]
 	if !ok {
 		user = NewUserData(userID)
 		s.Data.Users[userID] = user
 	}
+	// avoid duplicates
+	for _, t := range user.Times {
+		if t == time {
+			return
+		}
+	}
 	user.Times = append(user.Times, time)
+}
+
+func (s *Store) removeTime(userID string, time TimeRange) error {
+	user, ok := s.Data.Users[userID]
+	if !ok {
+		return errors.New("user not found")
+	}
+	for i, t := range user.Times {
+		if t == time {
+			user.Times = append(user.Times[:i], user.Times[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("time not found")
 }
 
 var weekdayMapping = map[string]time.Weekday{
@@ -88,58 +147,84 @@ var weekdayMapping = map[string]time.Weekday{
 // TODO: "Weekday 15:00"
 // TODO: "Weekend 15:00"
 // TODO: "Mon-Tue 15:00-17:00"
-func (s *Store) AddTime2(userID string, timeS string) error {
+func (s *Store) Subscribe(userID string, input string) error {
 	if len(userID) == 0 {
 		return errors.New("userID can't be blank")
 	}
+	tr, err := ParseTimeRange(input)
+	if err != nil {
+		return fmt.Errorf("incorrect time format: %w", err)
+	}
 	s.Lock()
 	defer s.Unlock()
-	data := strings.Split(strings.ToLower(strings.TrimSpace(timeS)), " ")
-	if len(data) != 2 {
-		return errors.New(`incorrect time format, expected format: "Mon 15:00"`)
+	s.addTime(userID, tr)
+	err = s.save()
+	if err != nil {
+		return fmt.Errorf("could not save data: %w", err)
 	}
-	weekday, ok := weekdayMapping[data[0]]
+	return nil
+}
+
+func (s *Store) Unsubscribe(userID, input string) error {
+	if len(userID) == 0 {
+		return errors.New("userID can't be blank")
+	}
+	tr, err := ParseTimeRange(input)
+	if err != nil {
+		return fmt.Errorf("incorrect time format: %w", err)
+	}
+	s.Lock()
+	defer s.Unlock()
+	err = s.removeTime(userID, tr)
+	if err != nil {
+		return err
+	}
+	err = s.save()
+	if err != nil {
+		return fmt.Errorf("could not save data: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Subscriptions(userID string) string {
+	s.RLock()
+	defer s.RUnlock()
+	user, ok := s.Data.Users[userID]
 	if !ok {
-		return fmt.Errorf("unknown day of the week: %s", weekday)
+		return ""
 	}
-	clock := strings.Split(data[1], ":")
+	var ranges []string
+	for _, tr := range user.Times {
+		ranges = append(ranges, tr.String())
+	}
+	return strings.Join(ranges, "\n")
+}
+
+func parseTime(timeS string) (Clock, error) {
+	clock := strings.Split(timeS, ":")
 	hour, err := strconv.ParseInt(clock[0], 10, 64)
 	if err != nil {
-		return fmt.Errorf("incorrect time format: \"%s\"", data[1])
+		return Clock{}, fmt.Errorf("incorrect time format: \"%s\"", timeS)
 	}
 	if hour < 0 || hour > 23 {
-		return errors.New("hour should be between 0 and 23")
+		return Clock{}, errors.New("hour should be between 0 and 23")
 	}
 	minute, err := strconv.ParseInt(clock[1], 10, 64)
 	if err != nil {
-		return fmt.Errorf("incorrect time format: \"%s\"", data[1])
+		return Clock{}, fmt.Errorf("incorrect time format: \"%s\"", timeS)
 	}
 	if minute < 0 || minute > 59 {
-		return errors.New("minute should be between 0 and 59")
+		return Clock{}, errors.New("minute should be between 0 and 59")
 	}
-	s.addTime(userID, Weektime{
-		Weekday: weekday,
-		Hour:    int(hour),
-		Minute:  int(minute),
-	})
-	return s.save()
+	return Clock{
+		Hour:   uint(hour),
+		Minute: uint(minute),
+	}, nil
 }
 
-func (s *Store) NewSlots(userID string, availableSlots Slots) Slots {
-	s.Lock()
-	defer s.Unlock()
-	data := s.Data.Users[userID]
-	userSlots := availableSlots.filterTimes(data.Times)
-	result := make(Slots)
-	for k, v := range userSlots {
-		if _, ok := data.Notified[k]; ok {
-			continue
-		}
-		data.Notified[k] = struct{}{}
-		result[k] = v
-	}
-	_ = s.save()
-	return result
+type Range struct {
+	Start time.Time
+	End   time.Time
 }
 
 func (s *Store) save() error {
@@ -149,5 +234,7 @@ func (s *Store) save() error {
 	if _, err := s.File.Seek(0, 0); err != nil {
 		return err
 	}
-	return json.NewEncoder(s.File).Encode(s.Data)
+	enc := json.NewEncoder(s.File)
+	enc.SetIndent("", "  ")
+	return enc.Encode(s.Data)
 }

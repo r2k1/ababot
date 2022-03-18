@@ -6,7 +6,6 @@ import (
 	"gopkg.in/telebot.v3/middleware"
 	"log"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -14,23 +13,7 @@ import (
 )
 
 const CourtsCount = 12
-const MinBookingDuration = 30 * time.Minute
-
-var testUser = UserData{
-	ID: "167935153",
-	Times: []Weektime{
-		{
-			Weekday: 6,
-			Hour:    6,
-			Minute:  0,
-		},
-		{
-			Weekday: 6,
-			Hour:    7,
-			Minute:  0,
-		},
-	},
-}
+const MinBookingDuration = 60 * time.Minute
 
 func main() {
 	pref := tele.Settings{
@@ -45,34 +28,32 @@ func main() {
 	checkErr(err)
 	b.Use(middleware.Logger())
 
-	b.Handle("/check", func(c tele.Context) error {
-		data, err := fetchData()
-		if err != nil {
-			return err
-		}
-		availableSlots := availableSlots(data)
-		return c.Send(availableSlots.HTML(), tele.ModeHTML)
+	b.Handle("/subscriptions", func(c tele.Context) error {
+		id := strconv.FormatInt(c.Sender().ID, 10)
+		msg := fmt.Sprintf("Current subscriptions:\n%s", store.Subscriptions(id))
+		return c.Send(msg)
 	})
-	b.Handle("/filter", func(c tele.Context) error {
-		data, err := fetchData()
-		if err != nil {
-			return err
-		}
-		availableSlots := availableSlots(data).filterTimes(testUser.Times)
-		if len(availableSlots) == 0 {
-			return c.Send("no available times for selected times")
-		}
-		return c.Send(availableSlots.HTML(), tele.ModeHTML)
 
-	})
 	b.Handle("/subscribe", func(c tele.Context) error {
 		id := strconv.FormatInt(c.Sender().ID, 10)
-		err := store.AddTime2(id, c.Data())
+		err := store.Subscribe(id, c.Data())
 		if err != nil {
 			return c.Send(err.Error())
 		}
-		return c.Send("noted")
+		msg := fmt.Sprintf("You are subscribed to\n%s", store.Subscriptions(id))
+		return c.Send(msg)
 	})
+
+	b.Handle("/unsubscribe", func(c tele.Context) error {
+		id := strconv.FormatInt(c.Sender().ID, 10)
+		err := store.Unsubscribe(id, c.Data())
+		if err != nil {
+			return c.Send(err.Error())
+		}
+		msg := fmt.Sprintf("Unsubscribed. Current subscriptions:\n%s", store.Subscriptions(id))
+		return c.Send(msg)
+	})
+
 	go func() {
 		log.Println("starting refresher")
 		ticker := time.NewTicker(time.Minute)
@@ -80,28 +61,6 @@ func main() {
 
 		check := func() {
 			log.Println("refreshing data")
-			data, err := fetchData()
-			if err != nil {
-				log.Println(err)
-			}
-			availableSlots := availableSlots(data)
-			for user := range store.Data.Users {
-				newSlots := store.NewSlots(user, availableSlots)
-				if len(newSlots) == 0 {
-					continue
-				}
-				userID, err := strconv.ParseInt(user, 10, 64)
-				if err != nil {
-					log.Println(err)
-					continue
-				}
-				log.Printf("sending %v slots to %v", len(newSlots), userID)
-				_, err = b.Send(&tele.User{ID: userID}, newSlots.HTML(), tele.ModeHTML)
-				if err != nil {
-					log.Println(err)
-					continue
-				}
-			}
 		}
 
 		check()
@@ -120,7 +79,7 @@ type Booking struct {
 	End   time.Time `json:"end"`
 }
 
-func fetchData() (map[time.Time]int, error) {
+func fetchData() ([]Booking, error) {
 	const layout = "2006-01-02"
 	url := fmt.Sprintf("https://platform.aklbadminton.com/api/booking/feed?start=%s&end=%s", time.Now().Format(layout), time.Now().Add(time.Hour*24*7).Format(layout))
 	log.Println("fetching", url)
@@ -137,45 +96,7 @@ func fetchData() (map[time.Time]int, error) {
 		return nil, err
 	}
 	log.Printf("fetched %d bookings", len(data))
-	return toMap(data), nil
-}
-
-func toMap(data []Booking) map[time.Time]int {
-	result := make(map[time.Time]int)
-	for _, booking := range data {
-		for t := booking.Start; t.Before(booking.End); t = t.Add(MinBookingDuration) {
-			result[t]++
-		}
-	}
-	return result
-}
-
-func availableSlots(bookings map[time.Time]int) Slots {
-	var minTime time.Time
-	var maxTime time.Time
-	for t := range bookings {
-		if minTime.IsZero() || t.Before(minTime) {
-			minTime = t
-		}
-		if maxTime.IsZero() || t.After(maxTime) {
-			maxTime = t
-		}
-	}
-	minTime = time.Date(minTime.Year(), minTime.Month(), minTime.Day(), 6, 0, 0, 0, minTime.Location())
-	maxTime = time.Date(maxTime.Year(), maxTime.Month(), maxTime.Day(), 24, 0, 0, 0, maxTime.Location())
-
-	result := make(Slots)
-	for t := minTime; t.Before(maxTime); t = t.Add(MinBookingDuration) {
-		// closed
-		if t.Hour() < 6 || t.Hour() > 18 {
-			continue
-		}
-		if bookings[t] >= CourtsCount {
-			continue
-		}
-		result[t] = CourtsCount - bookings[t]
-	}
-	return result
+	return data, nil
 }
 
 func checkErr(err error) {
@@ -184,40 +105,39 @@ func checkErr(err error) {
 	}
 }
 
-type Slots map[time.Time]int
+type Calendar map[time.Time]uint
 
-type Slot struct {
-	Timestamp time.Time
-	Courts    int
-}
-
-func (c Slots) toSlice() []Slot {
-	result := make([]Slot, 0, len(c))
-	for t, v := range c {
-		result = append(result, Slot{Timestamp: t, Courts: v})
+func NewCalendar(start, end time.Time) Calendar {
+	c := make(Calendar)
+	for t := start; t.Before(end); t = t.Add(MinBookingDuration) {
+		c[t] = CourtsCount
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Timestamp.Before(result[j].Timestamp)
-	})
-	return result
+	return c
 }
 
-func (c Slots) HTML() string {
-	var result string
-	for _, slot := range c.toSlice() {
-		result += fmt.Sprintf("<code>%s - %d</code>\n", slot.Timestamp.Format("Mon 2006-01-02 15:04"), slot.Courts)
+func (c Calendar) Book(b Booking) {
+	start := b.Start
+	start = time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), start.Minute(), 0, 0, start.Location())
+	// some bookings start and end at :30 minutes mark.
+	// for example 5:30-6:30, such interval are unavailable for us, so we need to reserve 5:00-7:00 slot in this case
+	end := b.End
+	end = time.Date(end.Year(), end.Month(), end.Day(), end.Hour(), end.Minute(), 0, 0, end.Location())
+	if b.End.Sub(end) > 0 {
+		end = end.Add(time.Hour)
 	}
-	return result
+	for t := b.Start; t.Before(b.End); t = t.Add(MinBookingDuration) {
+		c[t]--
+	}
 }
 
-func (c Slots) filterTimes(times []Weektime) Slots {
-	result := make(Slots)
-	for k, v := range c {
-		for _, t := range times {
-			if t.Weekday == k.Weekday() && t.Hour == k.Hour() && t.Minute == k.Minute() {
-				result[k] = v
-			}
+func (c Calendar) Available(start, end time.Time) bool {
+	if end.After(start) {
+		return false
+	}
+	for t := start; t.Before(end); t = t.Add(MinBookingDuration) {
+		if c[t] == 0 {
+			return false
 		}
 	}
-	return result
+	return true
 }
