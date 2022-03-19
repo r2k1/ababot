@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,6 +190,13 @@ func (s *Store) Unsubscribe(userID, input string) error {
 	return nil
 }
 
+func (s *Store) DeleteUser(userID string) error {
+	s.Lock()
+	defer s.Unlock()
+	delete(s.Data.Users, userID)
+	return s.save()
+}
+
 func (s *Store) Subscriptions(userID string) string {
 	s.RLock()
 	defer s.RUnlock()
@@ -237,4 +248,109 @@ func (s *Store) save() error {
 	enc := json.NewEncoder(s.File)
 	enc.SetIndent("", "  ")
 	return enc.Encode(s.Data)
+}
+
+type Calendar map[time.Time]uint
+
+func NewCalendar(start, end time.Time) Calendar {
+	c := make(Calendar)
+	start = time.Date(start.Year(), start.Month(), start.Day(), StartHour, 0, 0, 0, start.Location())
+	end = time.Date(end.Year(), end.Month(), end.Day(), EndHour, 0, 0, 0, end.Location())
+	for t := start; t.Before(end); t = t.Add(MinBookingDuration) {
+		if t.Hour() < StartHour || t.Hour() > EndHour {
+			continue
+		}
+		c[t] = CourtsCount
+	}
+	return c
+}
+
+func (cal Calendar) Book(b Booking) {
+	// some bookings start and end at :30 minutes mark.
+	// for example 5:30-6:30, such interval are unavailable for us, so we need to reserve 5:00-7:00 slot in this case
+	start := b.Start
+	start = time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), 0, 0, 0, start.Location())
+	end := b.End
+	end = time.Date(end.Year(), end.Month(), end.Day(), end.Hour(), 0, 0, 0, end.Location())
+	if b.End.Sub(end) > 0 {
+		end = end.Add(time.Hour)
+	}
+	for t := start; t.Before(end); t = t.Add(MinBookingDuration) {
+		if cal[t] > 0 {
+			cal[t]--
+		}
+	}
+}
+
+func (cal Calendar) IsAvailable(start, end time.Time) bool {
+	if end.After(start) {
+		return false
+	}
+	for t := start; t.Before(end); t = t.Add(MinBookingDuration) {
+		if cal[t] == 0 {
+			return false
+		}
+	}
+	return true
+}
+func (cal Calendar) NonZero() Calendar {
+	c := make(Calendar)
+	for t, v := range cal {
+		if v > 0 {
+			c[t] = v
+		}
+	}
+	return c
+}
+
+func (cal Calendar) String() string {
+	var buf bytes.Buffer
+	for _, v := range cal.toSlice() {
+		if v.Count > 0 {
+			buf.WriteString(fmt.Sprintf("%s - %d\n", v.Time.Format("2006-01-02 15:04"), v.Count))
+		}
+	}
+	return buf.String()
+}
+
+type Entry struct {
+	Time  time.Time
+	Count uint
+}
+
+func (cal Calendar) toSlice() []Entry {
+	var entries []Entry
+	for t, v := range cal {
+		entries = append(entries, Entry{t, v})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Time.Before(entries[j].Time)
+	})
+	return entries
+}
+
+type Booking struct {
+	Court int       `json:"resourceId"`
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+func fetchData() ([]Booking, error) {
+	const layout = "2006-01-02"
+	url := fmt.Sprintf("https://platform.aklbadminton.com/api/booking/feed?start=%s&end=%s", time.Now().Format(layout), time.Now().Add(time.Hour*24*8).Format(layout))
+	log.Println("fetching", url)
+	resp, err := http.DefaultClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("unexpected error code %d", resp.StatusCode)
+	}
+	var data []Booking
+	err = json.NewDecoder(resp.Body).Decode(&data)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("fetched %d bookings", len(data))
+	return data, nil
 }

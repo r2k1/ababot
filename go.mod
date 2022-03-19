@@ -3,6 +3,7 @@ module github.com/r2k1/ababot
 go 1.17
 
 require (
+	github.com/joho/godotenv v1.4.0
 	github.com/stretchr/testify v1.7.0
 	gopkg.in/telebot.v3 v3.0.0
 )
