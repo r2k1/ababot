@@ -31,25 +31,21 @@ func main() {
 	checkErr(err)
 	b.Use(middleware.Logger())
 
-	b.Handle("/available", func(c tele.Context) error {
-		data, err := fetchData()
+	b.Handle("/all", func(c tele.Context) error {
+		cal, err := fetchCalendar()
 		if err != nil {
 			return c.Send(err.Error())
-		}
-		cal := NewCalendar(time.Now(), time.Now().Add(time.Hour*24*7))
-		for _, b := range data {
-			cal.Book(b)
 		}
 		return c.Send(limitString(fmt.Sprintf("%v", cal.String()), 4096))
 	})
 
-	b.Handle("/subscriptions", func(c tele.Context) error {
+	b.Handle("/list", func(c tele.Context) error {
 		id := strconv.FormatInt(c.Sender().ID, 10)
 		msg := fmt.Sprintf("Current subscriptions:\n%s", store.Subscriptions(id))
 		return c.Send(msg)
 	})
 
-	b.Handle("/subscribe", func(c tele.Context) error {
+	b.Handle("/add", func(c tele.Context) error {
 		id := strconv.FormatInt(c.Sender().ID, 10)
 		err := store.Subscribe(id, c.Data())
 		if err != nil {
@@ -59,7 +55,7 @@ func main() {
 		return c.Send(msg)
 	})
 
-	b.Handle("/unsubscribe", func(c tele.Context) error {
+	b.Handle("/remove", func(c tele.Context) error {
 		id := strconv.FormatInt(c.Sender().ID, 10)
 		err := store.Unsubscribe(id, c.Data())
 		if err != nil {
@@ -75,7 +71,7 @@ func main() {
 		if err != nil {
 			return c.Send(err.Error())
 		}
-		return c.Send("Unsubscribed from everything")
+		return c.Send("All data deleted")
 	})
 
 	b.OnError = func(err error, c tele.Context) {
@@ -88,7 +84,12 @@ func main() {
 		defer ticker.Stop()
 
 		check := func() {
-			log.Println("refreshing data")
+			cal, err := fetchCalendar()
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			store.NotifyAll(b, cal)
 		}
 
 		check()

@@ -9,20 +9,34 @@ import (
 )
 
 func TestParseTimeRange(t *testing.T) {
-	tr, err := ParseTimeRange("Mon 16:00-18:00")
-	require.NoError(t, err)
-	assert.Equal(t, TimeRange{
-		Weekday: time.Monday,
-		Start: Clock{
-			Hour:   16,
-			Minute: 0,
-		},
-		End: Clock{
-			Hour:   18,
-			Minute: 0,
-		},
-	}, tr)
-	assert.Equal(t, "Mon 16:00-18:00", tr.String())
+	t.Run("without duration", func(t *testing.T) {
+		tr, err := ParseTimeRange("Mon 16:00")
+		require.NoError(t, err)
+		assert.Equal(t, Subscription{
+			Weekday: time.Monday,
+			Time: Clock{
+				Hour:   16,
+				Minute: 0,
+			},
+			Hours: 1,
+		}, tr)
+		assert.Equal(t, "Mon 16:00-17:00", tr.String())
+	})
+
+	t.Run("with duration", func(t *testing.T) {
+		tr, err := ParseTimeRange("Mon 16:00 2")
+		require.NoError(t, err)
+		assert.Equal(t, Subscription{
+			Weekday: time.Monday,
+			Time: Clock{
+				Hour:   16,
+				Minute: 0,
+			},
+			Hours: 2,
+		}, tr)
+		assert.Equal(t, "Mon 16:00-18:00", tr.String())
+	})
+
 }
 
 func Test_NewCalendar(t *testing.T) {

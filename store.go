@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gopkg.in/telebot.v3"
 	"io"
 	"log"
 	"net/http"
@@ -27,62 +28,71 @@ type Data struct {
 }
 
 type UserData struct {
-	ID       string                 `json:"id"`
-	Times    []TimeRange            `json:"times"`
-	Notified map[time.Time]struct{} `json:"notified"`
+	ID            string                 `json:"id"`
+	Subscriptions []Subscription         `json:"subscriptions"`
+	Notified      map[time.Time]struct{} `json:"notified"`
+}
+
+func (u *UserData) addToNotified(t time.Time) {
+	if u.Notified == nil {
+		u.Notified = make(map[time.Time]struct{})
+	}
+	u.Notified[t] = struct{}{}
 }
 
 func NewUserData(id string) *UserData {
 	return &UserData{
-		ID:       id,
-		Times:    make([]TimeRange, 0),
-		Notified: make(map[time.Time]struct{}),
+		ID:            id,
+		Subscriptions: make([]Subscription, 0),
+		Notified:      make(map[time.Time]struct{}),
 	}
 }
 
-type TimeRange struct {
+type Subscription struct {
 	Weekday time.Weekday `json:"weekday"`
-	Start   Clock
-	End     Clock
+	Time    Clock        `json:"time"`
+	Hours   int          `json:"hours"`
 }
 
-func ParseTimeRange(input string) (TimeRange, error) {
+func ParseTimeRange(input string) (Subscription, error) {
 	data := strings.Split(strings.ToLower(strings.TrimSpace(input)), " ")
-	if len(data) != 2 {
-		return TimeRange{}, errors.New(`incorrect time format, expected format: "Mon 15:00-17:00"`)
+	if len(data) < 2 || len(data) > 3 {
+		return Subscription{}, errors.New(`incorrect time format, expected format: "Mon 15:00 2"`)
 	}
 	weekday, ok := weekdayMapping[data[0]]
 	if !ok {
-		return TimeRange{}, fmt.Errorf("unknown day of the week: %s", weekday)
+		return Subscription{}, fmt.Errorf("unknown day of the week: %s", weekday)
 	}
 
-	clocks := strings.Split(data[1], "-")
-	if (len(clocks)) != 2 {
-		return TimeRange{}, errors.New("time should be provided in 13:00-15:00 format")
-	}
-	startClock, err := parseTime(clocks[0])
+	startClock, err := parseTime(data[1])
 	if err != nil {
-		return TimeRange{}, err
+		return Subscription{}, err
 	}
-	endClock, err := parseTime(clocks[1])
-	if err != nil {
-		return TimeRange{}, err
+	hours := 1
+	if len(data) >= 3 {
+		hours, err = strconv.Atoi(data[2])
+		if err != nil {
+			return Subscription{}, err
+		}
+	}
+	if hours < 1 {
+		return Subscription{}, errors.New("hours must be equal or greater than 1")
 	}
 
-	return TimeRange{
+	return Subscription{
 		Weekday: weekday,
-		Start:   startClock,
-		End:     endClock,
+		Time:    startClock,
+		Hours:   hours,
 	}, nil
 }
 
-func (r *TimeRange) String() string {
-	return fmt.Sprintf("%s %02d:%02d-%02d:%02d", r.Weekday.String()[:3], r.Start.Hour, r.Start.Minute, r.End.Hour, r.End.Minute)
+func (r *Subscription) String() string {
+	return fmt.Sprintf("%s %02d:%02d-%02d:%02d", r.Weekday.String()[:3], r.Time.Hour, r.Time.Minute, r.Time.Hour+r.Hours, r.Time.Minute)
 }
 
 type Clock struct {
-	Hour   uint `json:"hours"`
-	Minute uint `json:"minutes"`
+	Hour   int `json:"hours"`
+	Minute int `json:"minutes"`
 }
 
 func NewStore(path string) (*Store, error) {
@@ -101,29 +111,29 @@ func NewStore(path string) (*Store, error) {
 	}, nil
 }
 
-func (s *Store) addTime(userID string, time TimeRange) {
+func (s *Store) addTime(userID string, time Subscription) {
 	user, ok := s.Data.Users[userID]
 	if !ok {
 		user = NewUserData(userID)
 		s.Data.Users[userID] = user
 	}
 	// avoid duplicates
-	for _, t := range user.Times {
+	for _, t := range user.Subscriptions {
 		if t == time {
 			return
 		}
 	}
-	user.Times = append(user.Times, time)
+	user.Subscriptions = append(user.Subscriptions, time)
 }
 
-func (s *Store) removeTime(userID string, time TimeRange) error {
+func (s *Store) removeTime(userID string, time Subscription) error {
 	user, ok := s.Data.Users[userID]
 	if !ok {
 		return errors.New("user not found")
 	}
-	for i, t := range user.Times {
+	for i, t := range user.Subscriptions {
 		if t == time {
-			user.Times = append(user.Times[:i], user.Times[i+1:]...)
+			user.Subscriptions = append(user.Subscriptions[:i], user.Subscriptions[i+1:]...)
 			return nil
 		}
 	}
@@ -157,7 +167,7 @@ func (s *Store) Subscribe(userID string, input string) error {
 	}
 	tr, err := ParseTimeRange(input)
 	if err != nil {
-		return fmt.Errorf("incorrect time format: %w", err)
+		return err
 	}
 	s.Lock()
 	defer s.Unlock()
@@ -204,11 +214,47 @@ func (s *Store) Subscriptions(userID string) string {
 	if !ok {
 		return ""
 	}
-	var ranges []string
-	for _, tr := range user.Times {
-		ranges = append(ranges, tr.String())
+	var subMsgs []string
+	for _, tr := range user.Subscriptions {
+		subMsgs = append(subMsgs, tr.String())
 	}
-	return strings.Join(ranges, "\n")
+	if len(subMsgs) == 0 {
+		return "no subscriptions"
+	}
+	return strings.Join(subMsgs, "\n")
+}
+
+func (s *Store) NotifyAll(b *telebot.Bot, cal Calendar) {
+	s.RLock()
+	defer s.RUnlock()
+	for _, user := range s.Data.Users {
+		err := s.notifyUser(b, user, cal)
+		if err != nil {
+			log.Println("could not notify user", err)
+			continue
+		}
+	}
+}
+
+func (s *Store) notifyUser(b *telebot.Bot, user *UserData, cal Calendar) error {
+	userCal := cal.ForUserSubscriptions(user)
+	if len(userCal) == 0 {
+		return nil
+	}
+	id, err := strconv.Atoi(user.ID)
+	if err != nil {
+		return err
+	}
+	teleUser := &telebot.User{ID: int64(id)}
+	msg := fmt.Sprintf("New booking available:\n%s", userCal.String())
+	_, err = b.Send(teleUser, msg)
+	if err != nil {
+		return err
+	}
+	for t := range userCal {
+		user.addToNotified(t)
+	}
+	return s.save()
 }
 
 func parseTime(timeS string) (Clock, error) {
@@ -228,14 +274,9 @@ func parseTime(timeS string) (Clock, error) {
 		return Clock{}, errors.New("minute should be between 0 and 59")
 	}
 	return Clock{
-		Hour:   uint(hour),
-		Minute: uint(minute),
+		Hour:   int(hour),
+		Minute: int(minute),
 	}, nil
-}
-
-type Range struct {
-	Start time.Time
-	End   time.Time
 }
 
 func (s *Store) save() error {
@@ -293,6 +334,7 @@ func (cal Calendar) IsAvailable(start, end time.Time) bool {
 	}
 	return true
 }
+
 func (cal Calendar) NonZero() Calendar {
 	c := make(Calendar)
 	for t, v := range cal {
@@ -311,6 +353,43 @@ func (cal Calendar) String() string {
 		}
 	}
 	return buf.String()
+}
+
+func (cal Calendar) ForSubscription(subscription Subscription) Calendar {
+	result := make(Calendar)
+	for t, slots := range cal {
+		if t.Weekday() != subscription.Weekday {
+			continue
+		}
+		if t.Hour() != subscription.Time.Hour {
+			continue
+		}
+		for i := 1; i <= subscription.Hours; i++ {
+			nextSlots, ok := cal[t.Add(time.Hour*time.Duration(i))]
+			if !ok {
+				continue
+			}
+			if nextSlots < slots {
+				nextSlots = slots
+			}
+		}
+		result[t] = slots
+	}
+	return result
+}
+
+func (cal Calendar) ForUserSubscriptions(user *UserData) Calendar {
+	result := make(Calendar)
+	for _, subscription := range user.Subscriptions {
+		subCal := cal.ForSubscription(subscription)
+		for k, v := range subCal {
+			result[k] = v
+		}
+	}
+	for t := range user.Notified {
+		delete(result, t)
+	}
+	return result
 }
 
 type Entry struct {
@@ -353,4 +432,16 @@ func fetchData() ([]Booking, error) {
 	}
 	log.Printf("fetched %d bookings", len(data))
 	return data, nil
+}
+
+func fetchCalendar() (Calendar, error) {
+	data, err := fetchData()
+	if err != nil {
+		return nil, err
+	}
+	cal := NewCalendar(time.Now(), time.Now().Add(time.Hour*24*7))
+	for _, b := range data {
+		cal.Book(b)
+	}
+	return cal, nil
 }
