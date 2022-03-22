@@ -357,6 +357,7 @@ func (cal Calendar) String() string {
 
 func (cal Calendar) ForSubscription(subscription Subscription) Calendar {
 	result := make(Calendar)
+slotIter:
 	for t, slots := range cal {
 		if t.Weekday() != subscription.Weekday {
 			continue
@@ -364,16 +365,21 @@ func (cal Calendar) ForSubscription(subscription Subscription) Calendar {
 		if t.Hour() != subscription.Time.Hour {
 			continue
 		}
-		for i := 1; i <= subscription.Hours; i++ {
-			nextSlots, ok := cal[t.Add(time.Hour*time.Duration(i))]
+		// first slot found
+		dayCal := Calendar{t: slots}
+		// now check if we can book all slots
+		for i := 1; i < subscription.Hours; i++ {
+			nextTime := t.Add(time.Hour * time.Duration(i))
+			nextSlots, ok := cal[nextTime]
 			if !ok {
-				continue
+				continue slotIter
 			}
-			if nextSlots < slots {
-				nextSlots = slots
-			}
+			dayCal[nextTime] = nextSlots
 		}
-		result[t] = slots
+		// record we can book all slots
+		for k, v := range dayCal {
+			result[k] = v
+		}
 	}
 	return result
 }

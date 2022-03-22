@@ -72,3 +72,62 @@ func TestCalendar_Book(t *testing.T) {
 		time.Date(2020, 1, 1, 9, 0, 0, 0, time.Local): 1,
 	}, cal)
 }
+
+func TestCalendar_ForSubscription(t *testing.T) {
+	// 1-1-2020 is Wednesday
+	cal := Calendar{
+		time.Date(2020, 1, 1, 6, 0, 0, 0, time.Local): 1,
+		time.Date(2020, 1, 1, 7, 0, 0, 0, time.Local): 2,
+		time.Date(2020, 1, 1, 8, 0, 0, 0, time.Local): 3,
+		time.Date(2020, 1, 1, 9, 0, 0, 0, time.Local): 4,
+	}
+	t.Run("no match", func(t *testing.T) {
+		assert.Equal(t, Calendar{}, cal.ForSubscription(Subscription{
+			Weekday: time.Monday,
+			Time: Clock{
+				Hour:   6,
+				Minute: 0,
+			},
+			Hours: 1,
+		}))
+	})
+
+	t.Run("match", func(t *testing.T) {
+		assert.Equal(t, Calendar{
+			time.Date(2020, 1, 1, 6, 0, 0, 0, time.Local): 1,
+		}, cal.ForSubscription(Subscription{
+			Weekday: time.Wednesday,
+			Time: Clock{
+				Hour:   6,
+				Minute: 0,
+			},
+			Hours: 1,
+		}))
+	})
+
+	t.Run("double booking match", func(t *testing.T) {
+		assert.Equal(t, Calendar{
+			time.Date(2020, 1, 1, 6, 0, 0, 0, time.Local): 1,
+			time.Date(2020, 1, 1, 7, 0, 0, 0, time.Local): 2,
+		}, cal.ForSubscription(Subscription{
+			Weekday: time.Wednesday,
+			Time: Clock{
+				Hour:   6,
+				Minute: 0,
+			},
+			Hours: 2,
+		}))
+	})
+
+	t.Run("no match for a double booking", func(t *testing.T) {
+		assert.Equal(t, Calendar{}, cal.ForSubscription(Subscription{
+			Weekday: time.Wednesday,
+			Time: Clock{
+				Hour:   8,
+				Minute: 0,
+			},
+			Hours: 2,
+		}))
+	})
+
+}
